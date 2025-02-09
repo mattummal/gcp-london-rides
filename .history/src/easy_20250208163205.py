@@ -36,7 +36,7 @@ def run_easy_pipeline(output_path: str, beam_args: list) -> None:
     beam_options = PipelineOptions(
         beam_args,
         runner="DataflowRunner",
-        project="project-id",
+        project="alert-function-450214-c7",
         job_name="unique-job-name",
         temp_location="gs://my-bucket/temp",
         region="eu-central1",
