@@ -69,6 +69,7 @@ opentelemetry-semantic-conventions==0.51b0
 orjson==3.10.15
 overrides==7.7.0
 packaging==24.2
+pandas==2.2.3
 pluggy==1.5.0
 proto-plus==1.26.0
 protobuf==5.29.3
@@ -99,6 +100,7 @@ six==1.17.0
 sortedcontainers==2.4.0
 sqlparse==0.5.3
 typing_extensions==4.12.2
+tzdata==2025.1
 urllib3==2.3.0
 wrapt==1.17.2
 zipp==3.21.0
