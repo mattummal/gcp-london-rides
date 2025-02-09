@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Coding-Challenge"
+version = "1.0.0"
+description = "Coding Challenge"
+authors = [
+    { name = "Jeh", email = "jeh@telenet.be" }
+]
+dependencies = [
+    "apache-beam[gcp]==2.50.0",
+    "geopy==1.18.0"
+]
+readme = "README.md"
+keywords = ["beam", "challenge"]
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = { find = { exclude = ["notebooks"] } }
+py-modules = ["config"]
+include-package-data = true
