@@ -1,80 +1,86 @@
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions
-from apache_beam.pvalue import AsDict
-from easy import RideCount
+from apache_beam.options.pipeline_options import (
+    PipelineOptions,
+    SetupOptions,
+    WorkerOptions,
+)
+
 from geopy.distance import geodesic
-from typing import Dict, Iterator, Tuple
+from google.cloud import bigquery
 
 
-class DistanceMeasurement(beam.DoFn):
-    """A DoFn class for measuring distances between start and end stations."""
-
-    def process(
-        self,
-        element: Tuple[Tuple[int, int], int],
-        station_coords: Dict[int, Tuple[float, float]],
-    ) -> Iterator[str]:
-        (start_station, end_station), count = element
-
-        print(f"Processing element: {element}")
-
-        start_coords = station_coords.get(start_station)
-        end_coords = station_coords.get(end_station)
-
-        print(f"Start coords: {start_coords}, End coords: {end_coords}")
-
-        if start_coords and end_coords:
-            distance = geodesic(start_coords, end_coords).km
-            total_distance = distance * count
-            yield f"{start_station},{end_station},{count},{total_distance}"
-        else:
-            print(f"Missing coordinates for stations: {start_station}, {end_station}")
+PROJECT_ID = "gcp-project-id"
+BUCKET_NAME = "gcp-bucket-name"
 
 
-def run_hard_pipeline(output_path: str, beam_args: list) -> None:
-    """Runs the Beam pipeline to measure distances and write the output to a text file.
+class ComputeDistance(beam.DoFn):
+    def process(self, element, station_map):
+        start_id, stop_id, ride_count = element
 
-    Args:
-        output_path: The path to the output file where results will be written.
-        beam_args: Additional arguments for configuring the Beam pipeline.
-    """
-    beam_options = PipelineOptions(
-        beam_args,
+        if start_id in station_map and stop_id in station_map:
+            start_coords = station_map[start_id]
+            stop_coords = station_map[stop_id]
+            distance_km = geodesic(start_coords, stop_coords).km
+            total_distance = distance_km * ride_count
+            yield f"{start_id},{stop_id},{ride_count},{total_distance}"
+
+
+def run(project_id: str, bucket_name: str) -> None:
+    options = PipelineOptions(
+        project=project_id,
+        temp_location=f"gs://{bucket_name}/temp",
         runner="DataflowRunner",
-        project="gcp-project-id",
-        job_name="unique-job-name",
-        temp_location="gs://my-bucket/temp",
-        region="eu-central1",
+        region="europe-west1",
     )
-    with beam.Pipeline(options=beam_options) as bp:
-        station_coords = (
+
+    # Install dependencies on workers
+    options.view_as(SetupOptions).requirements_file = "./requirements.txt"
+    options.view_as(SetupOptions).setup_file = "./setup.py"
+    options.view_as(SetupOptions).save_main_session = True
+
+    # Improve worker scaling and machine performance
+    worker_options = options.view_as(WorkerOptions)
+    worker_options.num_workers = 5
+    worker_options.max_num_workers = 20
+    worker_options.machine_type = "n1-standard-4"
+
+    client = bigquery.Client(project=project_id)
+    station_query = """
+    SELECT id, latitude, longitude 
+    FROM `bigquery-public-data.london_bicycles.cycle_stations`
+    """
+    station_map = {
+        row["id"]: (row["latitude"], row["longitude"])
+        for row in client.query(station_query).result()
+    }
+
+    # Beam pipeline
+    with beam.Pipeline(options=options) as bp:
+        trips = (
             bp
-            | "Read Stations"
+            | "Read Trips"
             >> beam.io.ReadFromBigQuery(
-                query=(
-                    "SELECT station_id, latitude, longitude "
-                    "FROM `bigquery-public-data.london_bicycles.cycle_stations`"
-                ),
+                query="""
+             SELECT start_station_id, end_station_id
+             FROM `bigquery-public-data.london_bicycles.cycle_hire`
+             """,
                 use_standard_sql=True,
             )
-            | "Map Station Coords"
-            >> beam.Map(lambda x: (x["station_id"], (x["latitude"], x["longitude"])))
-            | "To Dict" >> beam.combiners.ToDict()
+            | "Pair and Count Rides"
+            >> beam.Map(
+                lambda row: ((row["start_station_id"], row["end_station_id"]), 1)
+            )
+            | "Aggregate Ride Counts" >> beam.CombinePerKey(sum)
+            | "Format Data" >> beam.Map(lambda row: (row[0][0], row[0][1], row[1]))
+            | "Compute Distance" >> beam.ParDo(ComputeDistance(), station_map)
+            | "Write to GCS"
+            >> beam.io.WriteToText(
+                f"gs://{bucket_name}/test-output/test-hard-task",
+                file_name_suffix=".txt",
+                num_shards=1,
+            )
         )
 
-        (
-            bp
-            | "ReadFromBigQuery"
-            >> beam.io.ReadFromBigQuery(
-                query=(
-                    "SELECT start_station_id, end_station_id "
-                    "FROM `bigquery-public-data.london_bicycles.cycle_hire`"
-                ),
-                use_standard_sql=True,
-            )
-            | "PairCount" >> beam.ParDo(RideCount())
-            | "Group&Sum" >> beam.CombinePerKey(sum)
-            | "DistanceMeasurement"
-            >> beam.ParDo(DistanceMeasurement(), station_coords=AsDict(station_coords))
-            | "WriteOut" >> beam.io.WriteToText(output_path, num_shards=1)
-        )
+
+if __name__ == "__main__":
+    run(PROJECT_ID, BUCKET_NAME)

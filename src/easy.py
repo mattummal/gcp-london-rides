@@ -17,29 +17,32 @@ class RideCount(beam.DoFn):
             and the value is 1, representing a single ride.
         """
         try:
-            start_station = int(element["start_station_id"])
-            end_station = int(element["end_station_id"])
+            start_station_id = element.get("start_station_id")
+            end_station_id = element.get("end_station_id")
+
+            if start_station_id is None or end_station_id is None:
+                print(f"Missing station ID in element: {element}")
+                return
+
+            start_station = int(start_station_id)
+            end_station = int(end_station_id)
             yield (start_station, end_station), 1
-        except ValueError as e:
-            print(f"Error converting station IDs to integers: {element} - {e}")
-        except KeyError as e:
-            print(f"Missing expected field in element: {element} - {e}")
+        except (TypeError, ValueError) as e:
+            print(f"Error processing element {element}: {e}")
 
 
-def run_easy_pipeline(output_path: str, beam_args: list) -> None:
+def run_easy_pipeline(output_path: str) -> None:
     """Runs the Beam pipeline to count rides and write the output to a text file.
 
     Args:
         output_path: The path to the output file where results will be written.
-        beam_args: Additional arguments for configuring the Beam pipeline.
     """
     beam_options = PipelineOptions(
-        beam_args,
         runner="DataflowRunner",
         project="gcp-project-id",
-        job_name="unique-job-name",
-        temp_location="gs://my-bucket/temp",
-        region="eu-central1",
+        job_name="gcp-random-job-name",
+        temp_location="gs://gcp-bucket-name/temp",
+        region="europe-west1",
     )
     with beam.Pipeline(options=beam_options) as bp:
         (
@@ -48,12 +51,27 @@ def run_easy_pipeline(output_path: str, beam_args: list) -> None:
             >> beam.io.ReadFromBigQuery(
                 query=(
                     "SELECT start_station_id, end_station_id "
-                    "FROM `bigquery-public-data.london_bicycles.cycle_hire`"
+                    "FROM `bigquery-public-data.london_bicycles.cycle_hire` "
                 ),
                 use_standard_sql=True,
             )
-            | "Pair&Count" >> beam.ParDo(RideCount())
+            | "FilterNulls"
+            >> beam.Filter(
+                lambda row: row["start_station_id"] is not None
+                and row["end_station_id"] is not None
+            )
+            | "PairCount" >> beam.ParDo(RideCount())
             | "GroupBy" >> beam.CombinePerKey(sum)
             | "FormatOutput" >> beam.Map(lambda x: f"{x[0][0]},{x[0][1]},{x[1]}")
-            | "WriteOutput" >> beam.io.WriteToText(output_path, num_shards=1)
+            | "WriteOutput"
+            >> beam.io.WriteToText(
+                file_path_prefix=output_path,
+                file_name_suffix=".txt",
+                shard_name_template="-SSSSS-of-NNNNN",
+                num_shards=1,
+            )
         )
+
+
+if __name__ == "__main__":
+    run_easy_pipeline("gs://gcp-bucket-name/test-output/output-file")
